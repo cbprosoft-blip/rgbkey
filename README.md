@@ -5,6 +5,7 @@ A lightweight utility (uses only ~10 MB RAM) to automatically change the RGB bac
 ## 🔥 Key Features
 - **Safe Mode:** Strictly limits brightness, speed, and animation mode values at the code level. No more risk of freezing your keyboard's MCU with invalid or out-of-bounds HID packets.
 - **Full RDP Support (Remote Desktop):** Unlike other tools, it intercepts "blind" layout switching (`Alt+Shift` / `Ctrl+Shift`) even inside active `mstsc.exe` sessions.
+Known Limitations: > * RDP / Virtual Machines: Keyboard layout tracking is frozen while inside an active remote desktop session due to OS-level environment isolation.
 - **Zero Dependencies:** No need to install heavy software (like OpenRGB), third-party drivers, or background services. It communicates directly with USB-HID.
 - **Built-in Icon:** The application dynamically renders its own clean icon in the system tray upon startup, eliminating the need to bundle or carry an external `.ico` file.
 - **Minimize to Tray:** Runs quietly in the background near the clock without cluttering your taskbar.
