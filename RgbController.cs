@@ -5,12 +5,13 @@ using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.IO;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 public class RgbController : Form
 {
     private readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.txt");
 
-    
+    // Safe default color and chip parameters
     private byte RuRed   = 255;
     private byte RuGreen = 0;
     private byte RuBlue  = 0;
@@ -23,7 +24,7 @@ public class RgbController : Form
     private byte Speed      = 2;   
     private byte Brightness = 2;   
 
-    // WinAPI  HID
+    // WinAPI for HID Communication
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern IntPtr CreateFile(
         string lpFileName, uint dwDesiredAccess, uint dwShareMode,
@@ -37,7 +38,7 @@ public class RgbController : Form
     private static extern bool HidD_SetFeature(
         IntPtr HidDeviceObject, byte[] lpReportBuffer, int ReportBufferLength);
 
-    // WinAPI Win
+    // WinAPI for Window and Thread Tracking
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
     
@@ -47,7 +48,7 @@ public class RgbController : Form
     [DllImport("user32.dll")]
     private static extern IntPtr GetKeyboardLayout(uint idThread);
 
-    // WinAPI foe HOOks
+    // WinAPI for Low-Level Keyboard Hook
     [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 
@@ -61,12 +62,12 @@ public class RgbController : Form
     [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     private static extern IntPtr GetModuleHandle(string lpModuleName);
 
-    // Icon
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
     private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
+    // Constant definitions for WinAPI
     private const uint GENERIC_READ = 0x80000000;
     private const uint GENERIC_WRITE = 0x40000000;
     private const uint FILE_SHARE_READ = 0x00000001;
@@ -79,6 +80,7 @@ public class RgbController : Form
     private const int WM_SYSKEYDOWN = 0x0104;
     private const int WM_SYSKEYUP = 0x0105;
 
+    // Infrastructure state variables
     private string _activeDevicePath = "";
     private TextBox _logBox;
     private string _lastLanguage = "en";
@@ -87,16 +89,23 @@ public class RgbController : Form
     private NotifyIcon _trayIcon;
     private ContextMenuStrip _trayMenu;
     private bool _allowVisible = false; 
-    private Icon _generatedIcon; // Храним иконку, чтобы корректно удалить ее при выходе
+    private Icon _generatedIcon; 
 
     private List<string> _devicePaths = new List<string>();
     private IntPtr _hookId = IntPtr.Zero;
     private LowLevelKeyboardProc _hookDelegate; 
 
+    // Keyboard state tracking flags
     private bool _isAltPressed = false;
     private bool _isShiftPressed = false;
     private bool _isCtrlPressed = false;
+    private bool _combinationFired = false; 
+    private DateTime _ignoreTimerUntil = DateTime.MinValue; 
 
+    // 1 = Alt+Shift (Default), 2 = Ctrl+Shift, 4 = Grave Accent (~), 3 = Disabled
+    private int _systemHotkeyType = 1; 
+
+    // UI Control references
     private Button _btnRuColor;
     private Button _btnEnColor;
     private NumericUpDown _numEffect;
@@ -105,26 +114,17 @@ public class RgbController : Form
 
     public RgbController()
     {
-        this.Text = "RK R87 RGB Controller (Safe Mode)";
+        // Initialize form parameters basic setup
+        this.Text = "RK R87 RGB Controller (Registry-Synced Mode)";
         this.Size = new Size(720, 600);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.FormBorderStyle = FormBorderStyle.FixedSingle;
         this.MaximizeBox = false;
 
-        // gen Icon
         _generatedIcon = GenerateAppIcon();
         this.Icon = _generatedIcon;
 
-        LoadSettings();
-
-        Panel settingsPanel = new Panel();
-        settingsPanel.Dock = DockStyle.Top;
-        settingsPanel.Height = 160;
-        settingsPanel.BackColor = SystemColors.Control;
-        this.Controls.Add(settingsPanel);
-
-        BuildInterfaceControls(settingsPanel);
-
+        // CRITICAL FIX: Initialize log control FIRST to prevent NullReferenceException during early logging
         _logBox = new TextBox();
         _logBox.Multiline = true;
         _logBox.Dock = DockStyle.Fill;
@@ -132,6 +132,19 @@ public class RgbController : Form
         _logBox.ScrollBars = ScrollBars.Vertical;
         _logBox.Font = new Font("Consolas", 9);
         this.Controls.Add(_logBox);
+
+        // Now it's perfectly safe to load settings and log data
+        LoadSettings();
+        DetectSystemHotkey(); 
+
+        // Create the rest of visual interface controls
+        Panel settingsPanel = new Panel();
+        settingsPanel.Dock = DockStyle.Top;
+        settingsPanel.Height = 160;
+        settingsPanel.BackColor = SystemColors.Control;
+        this.Controls.Add(settingsPanel);
+
+        BuildInterfaceControls(settingsPanel);
         _logBox.BringToFront(); 
 
         Log("=== RK R87 Safe RGB Controller ===");
@@ -142,18 +155,20 @@ public class RgbController : Form
         
         if (!string.IsNullOrEmpty(_activeDevicePath))
         {
+            // Background polling timer for mouse clicks and window switches
             Timer t = new Timer();
-            t.Interval = 250;
+            t.Interval = 100; 
             t.Tick += MonitorLayout;
             t.Start();
             
+            // Register low-level keyboard hook for predictive layout toggling
             _hookDelegate = HookCallback;
             using (Process curProcess = Process.GetCurrentProcess())
             using (ProcessModule curModule = curProcess.MainModule)
             {
                 _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _hookDelegate, GetModuleHandle(curModule.ModuleName), 0);
             }
-            Log("Мониторинг раскладки и RDP запущен.");
+            Log("Умный перехват и подавление вспышек активны.");
         }
 
         this.SizeChanged += RgbController_SizeChanged;
@@ -161,8 +176,6 @@ public class RgbController : Form
             if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId); 
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
-            
-            // clear memory
             if (_generatedIcon != null)
             {
                 IntPtr hIcon = _generatedIcon.Handle;
@@ -172,7 +185,38 @@ public class RgbController : Form
         };
     }
 
-    // create icon
+    private void DetectSystemHotkey()
+    {
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(@"Keyboard Layout\Toggle"))
+            {
+                if (key != null)
+                {
+                    string val = key.GetValue("Hotkey") as string;
+                    
+                    // C# 5.0 compatibility: local variable declared prior to 'out' pass
+                    int result; 
+                    if (int.TryParse(val, out result))
+                    {
+                        _systemHotkeyType = result;
+                        
+                        string comboName = "Unknown";
+                        if (_systemHotkeyType == 1) comboName = "Alt + Shift";
+                        if (_systemHotkeyType == 2) comboName = "Ctrl + Shift";
+                        if (_systemHotkeyType == 4) comboName = "Grave Accent / Клавиша Ё (~);";
+                        if (_systemHotkeyType == 3) comboName = "Disabled in OS settings";
+
+                        Log(string.Format("🔍 Системный хоткей из реестра: {0}", comboName));
+                        return;
+                    }
+                }
+            }
+        }
+        catch { }
+        Log("⚠️ Не удалось прочитать реестр. Используем Alt + Shift по умолчанию.");
+    }
+
     private Icon GenerateAppIcon()
     {
         try
@@ -182,40 +226,26 @@ public class RgbController : Form
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.Transparent);
-                    
-                    // 1. Базовый темный силуэт девайса
                     using (Brush bgBrush = new SolidBrush(Color.FromArgb(35, 35, 40)))
                     {
                         g.FillRectangle(bgBrush, 2, 6, 28, 20);
                     }
-                    
-                    // Контур корпуса клавиатуры
                     using (Pen framePen = new Pen(Color.FromArgb(90, 90, 100), 1))
                     {
                         g.DrawRectangle(framePen, 2, 6, 28, 20);
                     }
-
-                    // 2. Имитируем светящиеся зоны клавиш (RGB градиент-блоки)
-                    g.FillRectangle(Brushes.Crimson,    5,  11, 6,  10); // R
-                    g.FillRectangle(Brushes.LimeGreen,  13, 11, 6,  10); // G
-                    g.FillRectangle(Brushes.DodgerBlue, 21, 11, 6,  10); // B
-
-                    // 3. Маленький акцентный штрих снизу (пробел)
+                    g.FillRectangle(Brushes.Crimson,    5,  11, 6,  10); 
+                    g.FillRectangle(Brushes.LimeGreen,  13, 11, 6,  10); 
+                    g.FillRectangle(Brushes.DodgerBlue, 21, 11, 6,  10); 
                     using (Brush spaceBrush = new SolidBrush(Color.FromArgb(150, 150, 160)))
                     {
                         g.FillRectangle(spaceBrush, 10, 22, 12, 2);
                     }
                 }
-                
-                // get descr
                 return Icon.FromHandle(bmp.GetHicon());
             }
         }
-        catch
-        {
-            // not GDI
-            return SystemIcons.Application;
-        }
+        catch { return SystemIcons.Application; }
     }
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -227,13 +257,43 @@ public class RgbController : Form
 
             if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
             {
-                if (vkCode == 0x12 || vkCode == 0xA4 || vkCode == 0xA5) _isAltPressed = true;
-                if (vkCode == 0x10 || vkCode == 0xA0 || vkCode == 0xA1) _isShiftPressed = true;
-                if (vkCode == 0x11 || vkCode == 0xA2 || vkCode == 0xA3) _isCtrlPressed = true;
+                bool isModifier = false;
+                if (vkCode == 0x12 || vkCode == 0xA4 || vkCode == 0xA5) { _isAltPressed = true; isModifier = true; }
+                if (vkCode == 0x10 || vkCode == 0xA0 || vkCode == 0xA1) { _isShiftPressed = true; isModifier = true; }
+                if (vkCode == 0x11 || vkCode == 0xA2 || vkCode == 0xA3) { _isCtrlPressed = true; isModifier = true; }
 
-                if ((_isAltPressed && _isShiftPressed) || (_isCtrlPressed && _isShiftPressed))
+                // Check combinations strictly against parsed registry values
+                bool isTriggered = false;
+                
+                if (_systemHotkeyType == 1 && _isAltPressed && _isShiftPressed) 
+                    isTriggered = true;
+                else if (_systemHotkeyType == 2 && _isCtrlPressed && _isShiftPressed) 
+                    isTriggered = true;
+                else if (_systemHotkeyType == 4 && vkCode == 0xC0) // 0xC0 is VK_OEM_3 (Grave Accent / Tilde key)
+                    isTriggered = true;
+
+                // Execute predictive color swap immediately when user presses the registered key combo
+                if (isTriggered)
                 {
-                    CheckAndHandleRdpSwitch();
+                    if (!_combinationFired)
+                    {
+                        _combinationFired = true;
+
+                        // Predictive toggle - bypass active window polling delays
+                        _lastLanguage = (_lastLanguage == "ru") ? "en" : "ru";
+                        Log(string.Format("⌨️ [Перехват] Нажата комбинация ОС. Назначен цвет: '{0}'", _lastLanguage));
+                        ForceUpdateCurrentLayout();
+
+                        // Blindfold the window timer for 800ms to hide OS layout update lag spikes
+                        _ignoreTimerUntil = DateTime.Now.AddMilliseconds(800);
+                    }
+                }
+
+                // If any regular alphanumeric character key is pressed, unblind the polling timer immediately
+                // This means the window queue has definitely updated its layout context values
+                if (!isModifier)
+                {
+                    _ignoreTimerUntil = DateTime.MinValue; 
                 }
             }
             else if (msg == WM_KEYUP || msg == WM_SYSKEYUP)
@@ -241,30 +301,14 @@ public class RgbController : Form
                 if (vkCode == 0x12 || vkCode == 0xA4 || vkCode == 0xA5) _isAltPressed = false;
                 if (vkCode == 0x10 || vkCode == 0xA0 || vkCode == 0xA1) _isShiftPressed = false;
                 if (vkCode == 0x11 || vkCode == 0xA2 || vkCode == 0xA3) _isCtrlPressed = false;
-            }
-        }
-        return CallNextHookEx(_hookId, nCode, wParam, lParam);
-    }
 
-    private void CheckAndHandleRdpSwitch()
-    {
-        try
-        {
-            IntPtr foregroundWindow = GetForegroundWindow();
-            uint pid;
-            GetWindowThreadProcessId(foregroundWindow, out pid);
-            
-            using (Process p = Process.GetProcessById((int)pid))
-            {
-                if (p.ProcessName.ToLower().Contains("mstsc"))
+                if (!_isAltPressed && !_isShiftPressed && !_isCtrlPressed)
                 {
-                    _lastLanguage = (_lastLanguage == "ru") ? "en" : "ru";
-                    Log(string.Format("🔁 [RDP] Переключение на: '{0}'", _lastLanguage));
-                    ForceUpdateCurrentLayout();
+                    _combinationFired = false;
                 }
             }
         }
-        catch { }
+        return CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
     private void SaveSettings()
@@ -279,7 +323,7 @@ public class RgbController : Form
             };
             File.WriteAllLines(ConfigPath, lines);
         }
-        catch (Exception ex) { Log("Config save error: " + ex.Message); }
+        catch (Exception ex) { Log("Ошибка сохранения конфига: " + ex.Message); }
     }
 
     private void LoadSettings()
@@ -308,7 +352,6 @@ public class RgbController : Form
                     case "Brightness": Brightness = val; break;
                 }
             }
-            
             if (EffectMode > 20) EffectMode = 0;
             if (Speed > 5) Speed = 2;
             if (Brightness > 5) Brightness = 2;
@@ -330,16 +373,16 @@ public class RgbController : Form
         gbColors.Controls.Add(lblRu); gbColors.Controls.Add(_btnRuColor);
         gbColors.Controls.Add(lblEn); gbColors.Controls.Add(_btnEnColor);
 
-        GroupBox gbEffect = new GroupBox() { Text = " Safe params ", Location = new Point(370, 10), Size = new Size(320, 135) };
+        GroupBox gbEffect = new GroupBox() { Text = " Безопасные параметры чипа ", Location = new Point(370, 10), Size = new Size(320, 135) };
         Label lblEff = new Label() { Text = "Эффект (0-20):", Location = new Point(20, 32), Size = new Size(130, 20) };
         _numEffect = new NumericUpDown() { Location = new Point(160, 30), Size = new Size(70, 20), Minimum = 0, Maximum = 20, Value = EffectMode };
         _numEffect.ValueChanged += (s, e) => { EffectMode = (byte)_numEffect.Value; SaveSettings(); ForceUpdateCurrentLayout(); };
 
-        Label lblSpd = new Label() { Text = "Speed (0-5):", Location = new Point(20, 67), Size = new Size(130, 20) };
+        Label lblSpd = new Label() { Text = "Скорость (0-5):", Location = new Point(20, 67), Size = new Size(130, 20) };
         _numSpeed = new NumericUpDown() { Location = new Point(160, 65), Size = new Size(70, 20), Minimum = 0, Maximum = 5, Value = Speed };
         _numSpeed.ValueChanged += (s, e) => { Speed = (byte)_numSpeed.Value; SaveSettings(); ForceUpdateCurrentLayout(); };
 
-        Label lblBrt = new Label() { Text = "Ligth (0-5):", Location = new Point(20, 102), Size = new Size(130, 20) };
+        Label lblBrt = new Label() { Text = "Яркость (0-5):", Location = new Point(20, 102), Size = new Size(130, 20) };
         _numBrightness = new NumericUpDown() { Location = new Point(160, 100), Size = new Size(70, 20), Minimum = 0, Maximum = 5, Value = Brightness };
         _numBrightness.ValueChanged += (s, e) => { Brightness = (byte)_numBrightness.Value; SaveSettings(); ForceUpdateCurrentLayout(); };
 
@@ -404,7 +447,7 @@ public class RgbController : Form
 
         _trayIcon = new NotifyIcon();
         _trayIcon.Text = "RK R87 RGB Controller";
-        _trayIcon.Icon = _generatedIcon; // To tray
+        _trayIcon.Icon = _generatedIcon; 
         _trayIcon.ContextMenuStrip = _trayMenu;
         _trayIcon.Visible = true;
         _trayIcon.DoubleClick += OnTrayOpen;
@@ -467,7 +510,7 @@ public class RgbController : Form
             
             if (success)
             {
-                Log(string.Format("✅ Key Init (Interface №{0}).", _currentInterface + 1));
+                Log(string.Format("✅ Клавиатура инициализирована (Интерфейс №{0}).", _currentInterface + 1));
                 _activeDevicePath = path; 
                 return;
             }
@@ -480,36 +523,46 @@ public class RgbController : Form
         try
         {
             IntPtr foregroundWindow = GetForegroundWindow();
+            if (foregroundWindow == IntPtr.Zero) return _lastLanguage;
+
             uint pid;
             uint threadId = GetWindowThreadProcessId(foregroundWindow, out pid);
             
             using (Process p = Process.GetProcessById((int)pid))
             {
-                if (p.ProcessName.ToLower().Contains("mstsc"))
+                string procName = p.ProcessName.ToLower();
+                // If RDP or Windows system switcher overlay is active, freeze the color to maintain stability
+                if (procName.Contains("mstsc") || procName.Contains("inputswitch") || procName.Contains("explorer"))
                     return _lastLanguage; 
             }
 
             IntPtr layoutId = GetKeyboardLayout(threadId);
             int langId = (int)layoutId & 0xFFFF;
+            if (langId == 0) return _lastLanguage;
+
             return new System.Globalization.CultureInfo(langId).TwoLetterISOLanguageName.ToLower();
         }
-        catch { return "en"; }
+        catch { return _lastLanguage; }
     }
 
     private void MonitorLayout(object sender, EventArgs e)
     {
         if (string.IsNullOrEmpty(_activeDevicePath)) return;
+        
+        // Anti-flicker protection: Skip timer evaluation if the hotkey timeout window is currently running
+        if (DateTime.Now < _ignoreTimerUntil) return;
+
         try
         {
             string currentLayout = GetActiveWindowLanguage();
             if (currentLayout != _lastLanguage)
             {
                 _lastLanguage = currentLayout;
-                Log(string.Format("📢 Change layout: '{0}'", currentLayout));
+                Log(string.Format("📢 Переключение мышью / Автосинхронизация: '{0}'", currentLayout));
                 ForceUpdateCurrentLayout();
             }
         }
-        catch (Exception ex) { Log(string.Format("Error: {0}", ex.Message)); }
+        catch (Exception ex) { Log(string.Format("Ошибка: {0}", ex.Message)); }
     }
 
     private void SendRgb(byte r, byte g, byte b)
@@ -539,6 +592,7 @@ public class RgbController : Form
 
     private void Log(string message)
     {
+        if (_logBox == null) return;
         if (_logBox.InvokeRequired)
         {
             _logBox.Invoke(new Action<string>(Log), message);
